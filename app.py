@@ -41,13 +41,17 @@ def backtest_strategy(df, capital):
     max_loss = min(trades)
     return win_rate, total_ret, profit_amount, max_loss
 
-@st.cache_data(ttl=3600)
+# --- 優化後的個股名稱抓取 ---
+@st.cache_data(ttl=86400) # 快取一天，避免重複請求
 def get_stock_name(stock_id):
     try:
         ticker = yf.Ticker(stock_id)
-        return ticker.info.get('shortName', stock_id)
+        # 優先嘗試不同的名稱欄位
+        info = ticker.info
+        name = info.get('longName') or info.get('shortName') or info.get('symbol')
+        return name
     except:
-        return stock_id
+        return stock_id.split('.')[0] # 失敗時至少回傳數字代號
 
 def analyze_stock(stock_no, total_capital):
     stock_id = f"{stock_no}.TW"
@@ -76,20 +80,17 @@ def analyze_stock(stock_no, total_capital):
     ma20_prev = float(ma_series.iloc[-6])
     is_ma_up = ma20 > ma20_prev
     
-    # 診斷理由
     reasons = []
     if curr_p >= ma20:
         if is_ma_up:
             trend_status, trend_color = "🌕 強勢多頭", "green"
             reasons.append("✅ **趨勢翻多**：股價站在上彎的月線之上。")
-            if vol_ratio >= 1.2:
-                reasons.append(f"🔥 **帶量突破**：一般成交張數 ({main_volume_lots}) 具備強大攻擊力。")
         else:
             trend_status, trend_color = "☁️ 弱勢反彈 (防假突破)", "blue"
-            reasons.append("⚠️ **假突破警戒**：股價雖過線，但月線仍下彎，不建議進場。")
+            reasons.append("⚠️ **假突破警戒**：月線仍下彎，不建議進場。")
     else:
         trend_status, trend_color = ("⛅ 多頭回檔", "orange") if is_ma_up else ("🌑 趨勢偏弱", "red")
-        reasons.append("❌ **非多頭格局**：目前不符合建倉條件。")
+        reasons.append("❌ **目前不符合建倉條件。**")
 
     win_rate, total_ret, profit_amt, max_loss = backtest_strategy(df.iloc[-252:], total_capital)
     shares = int((total_capital * 0.4) // curr_p)
@@ -117,19 +118,18 @@ if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        # 顯示名稱與代號
-        st.header(f"{res['name']} ({res['id']})")
-        st.subheader(f"🔍 診斷報告 (日期: {res['date']})")
-        st.markdown(f"### 狀態：:{res['trend_color']}[{res['trend_status']}]")
+        # 標題加強呈現
+        st.header(f"📌 {res['name']} ({res['id']})")
+        st.markdown(f"### 當前狀態：:{res['trend_color']}[{res['trend_status']}]")
         
         v1, v2, v3 = st.columns(3)
         v1.metric("當前股價", f"{res['price']:.2f}")
         v2.metric("一般成交量", f"{res['main_vol']:,} 張")
         v3.metric("5日均張", f"{res['avg_vol_5']:,} 張")
-        st.caption(f"ℹ️ 包含額外零股/盤後量：{res['odd_vol']:,} 股")
+        st.caption(f"ℹ️ 包含額外零股/盤後量：{res['odd_vol']:,} 股 | 數據日期: {res['date']}")
 
         st.write("---")
-        st.subheader("💡 盤勢診斷細節")
+        st.subheader("💡 診斷細節")
         for r in res['reasons']: st.write(r)
 
         st.write("---")
@@ -151,7 +151,7 @@ if target:
             })
             st.table(plan_df)
         else:
-            st.warning(f"❌ 當前非強勢多頭，不建議執行金字塔建倉。")
+            st.warning(f"❌ 目前不建議執行計畫。")
 
         # --- 底部：金字塔策略準則 ---
         st.subheader("📖 金字塔滾動策略準則")
@@ -160,17 +160,17 @@ if target:
             st.markdown("#### 1️⃣ 資金分配 (4:3:3)")
             st.write(f"- **底倉 (40%)**：股價站穩月線進場。")
             st.write(f"- **加碼 (30%)**：獲利達 **+7%** 時執行。")
-            st.write(f"- **剩餘 (30%)**：獲利擴大或帶量突破新高。")
+            st.write(f"- **剩餘 (30%)**：獲利擴大或突破新高。")
         with col_b:
             st.markdown("#### 2️⃣ 出場紀律")
-            st.write(f"- **硬性止損**：成本 **-7%** 出場。")
+            st.write(f"- **硬性止損**：成本 **-7%** 絕不留戀。")
             st.write(f"- **趨勢出場**：收盤跌破月線 (**{res['ma20']:.2f}**)。")
             st.write(f"- **移動停利**：獲利達 **+15%** 以上分批落袋。")
 
         st.info(f"""
         **⚠️ 投資風險溫馨提醒：**
-        1. **回測數據說明**：上方「歷史勝率」與「累積報酬」係根據**過去一年 (252個交易日)** 歷史模擬。過去績效不代表未來表現。
-        2. **假突破風險**：即便指標翻多，仍須嚴格設定止損以應對假突破陷阱。
+        1. **回測數據說明**：歷史績效係根據過去一年數據模擬，不代表未來表現。
+        2. **假突破風險**：即便指標翻多，仍須嚴格設定止損。
         3. **執行力**：策略核心在於「砍斷虧損，讓利潤奔跑」。
         """)
     else:
