@@ -2,9 +2,13 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 
 # --- 網頁配置 ---
 st.set_page_config(page_title="金字塔滾動策略系統", layout="centered")
+
+# --- 硬編碼 Fugle API Token ---
+FUGLE_TOKEN = "YjhjNGU4MDgtNGU1Zi00ZDc3LWE0ODItMTczMTVkMzAwNzAwIDk3YzQwZWYxLWQ4NWItNDg5NS1iODFjLWU0YjYzNTIwOTdlYw=="
 
 # --- 核心邏輯：跳動單位修正 ---
 def adjust_tick(price):
@@ -15,13 +19,25 @@ def adjust_tick(price):
     elif price < 1000: return round(price)
     else: return round(price / 5) * 5
 
+# --- 富果 API 名稱抓取 ---
+@st.cache_data(ttl=86400)
+def get_stock_name(stock_no):
+    try:
+        url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/tickers/{stock_no}"
+        headers = {"X-Fugle-Resusage-Token": FUGLE_TOKEN}
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json().get('name')
+    except:
+        pass
+    return stock_no
+
 # --- 回測引擎 ---
 def backtest_strategy(df, capital):
     df = df.copy()
     close_prices = df['Close'].squeeze()
     ma20_series = close_prices.rolling(window=20).mean()
     in_position, buy_price, trades = False, 0, []
-    
     for i in range(20, len(df)):
         curr_p = float(close_prices.iloc[i])
         ma20 = float(ma20_series.iloc[i])
@@ -33,114 +49,90 @@ def backtest_strategy(df, capital):
             if curr_p < ma20 or curr_p < buy_price * 0.93:
                 trades.append((curr_p - buy_price) / buy_price)
                 in_position = False
-    
     if not trades: return 0, 0, 0, 0
     win_rate = len([t for t in trades if t > 0]) / len(trades)
     total_ret = (np.prod([1 + t for t in trades]) - 1)
-    profit_amount = capital * total_ret
-    max_loss = min(trades)
-    return win_rate, total_ret, profit_amount, max_loss
-
-# --- 強度更高的中文名稱抓取 ---
-@st.cache_data(ttl=86400)
-def get_stock_name(stock_id):
-    try:
-        ticker = yf.Ticker(stock_id)
-        # 嘗試從 info 中提取，Yahoo 對台股通常在 longName 或 shortName 提供中文
-        info = ticker.info
-        name = info.get('longName') or info.get('shortName') or info.get('symbol')
-        
-        # 過濾：如果抓到的是純英文且包含 ".TW"，則只顯示代號
-        if not name or name == stock_id:
-            return stock_id.split('.')[0]
-        return name
-    except:
-        return stock_id.split('.')[0]
+    return win_rate, total_ret, capital * total_ret, min(trades)
 
 def analyze_stock(stock_no, total_capital):
     stock_id = f"{stock_no}.TW"
-    # 下載數據，強制不使用 progress bar 減少干擾
-    df = yf.download(stock_id, period="2y", interval="1d", progress=False)
+    ticker = yf.Ticker(stock_id)
+    df = ticker.history(period="2y")
     if df.empty or len(df) < 20:
         stock_id = f"{stock_no}.TWO"
-        df = yf.download(stock_id, period="2y", interval="1d", progress=False)
+        ticker = yf.Ticker(stock_id)
+        df = ticker.history(period="2y")
     
     if df.empty: return None
 
-    # 執行名稱抓取
-    stock_name = get_stock_name(stock_id)
-    
-    df = df[df['Volume'] > 0].copy()
+    # --- 基本面與籌碼面數據 ---
+    try:
+        yoy = ticker.info.get('revenueGrowth', 0) * 100
+        inst_pct = ticker.info.get('heldPercentInstitutions', 0) * 100
+    except:
+        yoy, inst_pct = 0, 0
+
+    stock_name = get_stock_name(stock_no)
     latest_data = df.iloc[-1]
-    data_date = df.index[-1].strftime('%Y-%m-%d')
     curr_p = float(latest_data['Close'])
     
-    # 成交量拆解
-    total_volume_shares = int(latest_data['Volume'])
-    main_volume_lots = total_volume_shares // 1000
-    odd_volume_shares = total_volume_shares % 1000
-    avg_vol_5_lots = round(float(df['Volume'].iloc[-6:-1].mean()) / 1000)
-    
+    # 技術指標
     ma_series = df['Close'].rolling(window=20).mean()
     ma20 = float(ma_series.iloc[-1])
-    ma20_prev = float(ma_series.iloc[-6])
-    is_ma_up = ma20 > ma20_prev
+    is_ma_up = ma20 > float(ma_series.iloc[-6])
     
-    # 診斷與假突破邏輯
+    # 診斷理由
     reasons = []
     if curr_p >= ma20:
-        if is_ma_up:
-            trend_status, trend_color = "🌕 強勢多頭", "green"
-            reasons.append("✅ **趨勢翻多**：股價站在上彎的月線之上。")
-        else:
-            trend_status, trend_color = "☁️ 弱勢反彈 (防假突破)", "blue"
-            reasons.append("⚠️ **假突破警戒**：月線仍下彎，目前過線極可能是假突破。")
+        status, color = ("🌕 強勢多頭", "green") if is_ma_up else ("☁️ 弱勢反彈 (防假突破)", "blue")
+        if is_ma_up: reasons.append("✅ **趨勢翻多**：股價站上月線且趨勢向上。")
+        else: reasons.append("⚠️ **假突破警告**：月線仍下彎，小心騙線觀望。")
     else:
-        trend_status, trend_color = ("⛅ 多頭回檔", "orange") if is_ma_up else ("🌑 趨勢偏弱", "red")
-        reasons.append("❌ **目前不符合建倉條件**。")
+        status, color = ("⛅ 多頭回檔", "orange") if is_ma_up else ("🌑 趨勢偏弱", "red")
+        reasons.append("❌ **目前不符合進場條件**。")
 
-    win_rate, total_ret, profit_amt, max_loss = backtest_strategy(df.iloc[-252:], total_capital)
+    win_rate, total_ret, profit_amt, max_loss = backtest_strategy(df, total_capital)
     shares = int((total_capital * 0.4) // curr_p)
     
     return {
-        "id": stock_no, "name": stock_name, "date": data_date, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
-        "trend_status": trend_status, "trend_color": trend_color, "reasons": reasons,
-        "main_vol": main_volume_lots, "odd_vol": odd_volume_shares, "avg_vol_5": avg_vol_5_lots,
+        "id": stock_no, "name": stock_name, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
+        "status": status, "color": color, "reasons": reasons, "yoy": yoy, "inst": inst_pct,
+        "main_vol": int(latest_data['Volume']) // 1000, "avg_vol_5": round(float(df['Volume'].iloc[-6:-1].mean()) / 1000),
         "lots": shares // 1000, "odds": shares % 1000,
-        "stop_loss": adjust_tick(curr_p * 0.93),
-        "add_1": adjust_tick(curr_p * 1.07), "tp_1": adjust_tick(curr_p * 1.15),
-        "win_rate": win_rate, "total_ret": total_ret, "profit_amt": profit_amt, "max_loss": max_loss,
-        "capital": total_capital
+        "stop_loss": adjust_tick(curr_p * 0.93), "add_1": adjust_tick(curr_p * 1.07), "tp_1": adjust_tick(curr_p * 1.15),
+        "win_rate": win_rate, "total_ret": total_ret, "profit_amt": profit_amt, "max_loss": max_loss
     }
 
 # --- 介面呈現 ---
 st.title("🏆 金字塔滾動策略系統")
 
-st.sidebar.header("⚙️ 參數設定")
-user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, value=100000, step=10000)
-
+user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, value=100000)
 target = st.text_input("📍 請輸入股票代號 (如: 2330, 3481)", "")
 
 if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        # 標題優化：顯眼的中文字樣
         st.header(f"📌 {res['name']} ({res['id']})")
-        st.markdown(f"### 當前狀態：:{res['trend_color']}[{res['trend_status']}]")
         
-        v1, v2, v3 = st.columns(3)
-        v1.metric("當前股價", f"{res['price']:.2f}")
-        v2.metric("一般成交量", f"{res['main_vol']:,} 張")
-        v3.metric("5日均張", f"{res['avg_vol_5']:,} 張")
-        st.caption(f"ℹ️ 包含額外零股/盤後量：{res['odd_vol']:,} 股 | 數據日期: {res['date']}")
+        # 指標卡
+        i1, i2, i3 = st.columns(3)
+        i1.metric("營收年增率 (YoY)", f"{res['yoy']:.1f}%")
+        i2.metric("法人持股 (估)", f"{res['inst']:.1f}%")
+        i3.metric("當前股價", f"{res['price']:.2f}")
+
+        st.markdown(f"### 狀態：:{res['color']}[{res['status']}]")
+        
+        v1, v2 = st.columns(2)
+        v1.metric("今日成交張數", f"{res['main_vol']:,} 張")
+        v2.metric("5 日均張", f"{res['avg_vol_5']:,} 張")
 
         st.write("---")
-        st.subheader("💡 盤勢診斷細節")
+        st.subheader("💡 綜合診斷")
         for r in res['reasons']: st.write(r)
 
         st.write("---")
-        st.caption(f"📊 過去一年回測績效 (本金: {res['capital']:,.0f})")
+        st.caption(f"📊 過去一年回測績效")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("歷史勝率", f"{res['win_rate']*100:.1f}%")
         c2.metric("累積報酬", f"{res['total_ret']*100:.1f}%")
@@ -148,19 +140,18 @@ if target:
         c4.metric("最大單賠", f"{res['max_loss']*100:.1f}%")
         
         st.divider()
-        
-        if res['trend_status'] == "🌕 強勢多頭":
+        if res['status'] == "🌕 強勢多頭":
             st.success("✅ 符合建倉條件")
-            st.code(f"【作戰計畫】\n建議買進：{res['lots']}張 + {res['odds']}股\n止損參考：{res['stop_loss']:.2f}", language="text")
-            plan_df = pd.DataFrame({
-                "動作": ["🛑 止損", "📍 建倉", "➕ 加倉", "💰 停利"],
+            st.code(f"買進建議：{res['lots']}張 + {res['odds']}股\n止損參考：{res['stop_loss']:.2f}", language="text")
+            st.table(pd.DataFrame({
+                "動作": ["🛑 止損 (-7%)", "📍 建倉 (40%)", "➕ 加倉 (+7%)", "💰 停利 (+15%)"],
                 "價格": [f"{res['stop_loss']:.2f}", f"{res['price']:.2f}", f"{res['add_1']:.2f}", f"{res['tp_1']:.2f}"]
-            })
-            st.table(plan_df)
+            }))
         else:
-            st.warning(f"❌ 目前非強勢多頭，不建議執行金字塔建倉。")
+            st.warning("❌ 目前不符合進場條件。")
 
-        # --- 底部：金字塔策略準則 ---
+        # --- 補回：金字塔策略準則 (最重要區塊) ---
+        st.write("---")
         st.subheader("📖 金字塔滾動策略準則")
         col_a, col_b = st.columns(2)
         with col_a:
@@ -175,10 +166,10 @@ if target:
             st.write(f"- **移動停利**：獲利達 **+15%** 以上分批落袋。")
 
         st.info(f"""
-        **⚠️ 投資風險溫馨提醒：**
-        1. **回測數據說明**：歷史績效係根據過去一年數據模擬，不代表未來表現。
-        2. **假突破風險**：即便指標翻多，仍須嚴格設定止損以應對假突破陷阱。
-        3. **執行力**：策略核心在於「砍斷虧損，讓利潤奔跑」。
+        **⚠️ 投資風險提醒：**
+        1. 營收 YoY > 0% 代表公司有基本面支撐。
+        2. 法人持股比例越高，籌碼相對集中穩定。
+        3. 策略核心：**「砍斷虧損，讓利潤奔跑」**。
         """)
     else:
         st.error("查無資料。")
