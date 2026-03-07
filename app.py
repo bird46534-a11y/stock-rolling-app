@@ -1,45 +1,75 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import date
 
-st.set_page_config(page_title="10萬本金滾動助手", layout="centered")
-st.title("📈 台股金字塔滾動交易系統")
-st.write("針對國泰證券 2.8 折手續費優化")
+# --- 網頁配置 ---
+st.set_page_config(page_title="國泰滾動助手", layout="centered")
+st.title("📈 個人交易決策系統")
+st.caption("策略：10萬金字塔滾動法 | 手續費：國泰 2.8 折優化")
 
-CAPITAL = 100000
-FEE_DISCOUNT = 0.28
-TAX_RATE = 0.003
-
+# --- 核心邏輯 ---
 def analyze_stock(stock_no):
     stock_id = f"{stock_no}.TW"
-    df = yf.download(stock_id, period="1y", interval="1d", progress=False)
+    # 抓取資料 (優先嘗試上市，不行再嘗試上櫃)
+    df = yf.download(stock_id, period="60d", interval="1d", progress=False)
     if df.empty:
         stock_id = f"{stock_no}.TWO"
-        df = yf.download(stock_id, period="1y", interval="1d", progress=False)
+        df = yf.download(stock_id, period="60d", interval="1d", progress=False)
+    
     if df.empty: return None
-    df['MA5'] = df['Close'].rolling(window=5).mean()
+
+    # 計算技術指標
     df['MA20'] = df['Close'].rolling(window=20).mean()
     curr_p = float(df['Close'].iloc[-1])
     ma20 = float(df['MA20'].iloc[-1])
-    ma5 = float(df['MA5'].iloc[-1])
-    total_shares = int(40000 // curr_p)
-    return {"stock_id": stock_id, "price": curr_p, "ma20": ma20, "ma5": ma5, "lots": total_shares // 1000, "odds": total_shares % 1000, "stop_loss": curr_p * 0.93}
+    
+    # 計算國泰下單股數 (本金 40% 為第一階段)
+    target_amount = 40000 
+    total_shares = int(target_amount // curr_p)
+    full_lots = total_shares // 1000
+    odd_shares = total_shares % 1000
+    
+    return {
+        "name": stock_no,
+        "price": curr_p,
+        "ma20": ma20,
+        "lots": full_lots,
+        "odds": odd_shares,
+        "stop_loss": curr_p * 0.93
+    }
 
-target = st.text_input("輸入台股代號 (例: 3481)", "")
-if st.button("開始分析"):
-    if target:
-        res = analyze_stock(target)
-        if res:
-            st.subheader(f"📊 分析結果：{res['stock_id']}")
-            col1, col2 = st.columns(2)
-            col1.metric("當前股價", f"{res['price']:.2f}")
-            col2.metric("月線 (MA20)", f"{res['ma20']:.2f}")
-            if res['price'] > res['ma20']:
-                st.success("✅ 趨勢偏多：符合建倉條件")
-                st.info(f"💡 **國泰 App 操作指令**：\n\n買入 **{res['lots']} 張** + **{res['odds']} 股**\n\n智慧單止損設：**{res['stop_loss']:.2f}**")
-            else:
-                st.warning("❌ 趨勢偏弱：目前股價在月線下，建議觀望。")
-        else: st.error("找不到該股票資料。")
-st.divider()
-st.caption("註：本網頁僅供策略模擬參考，投資請謹慎評估風險。")
+# --- 介面呈現 ---
+target = st.text_input("📍 請輸入股票代號", placeholder="例如: 3481")
+
+if target:
+    res = analyze_stock(target)
+    if res:
+        st.divider()
+        
+        # 第一層：股價與趨勢
+        col1, col2 = st.columns(2)
+        col1.metric("當前股價", f"{res['price']:.2f}")
+        col2.metric("月線 (MA20)", f"{res['ma20']:.2f}", 
+                    delta=f"{res['price']-res['ma20']:.2f}", delta_color="normal")
+
+        # 第二層：下單決策 (最醒目的部分)
+        if res['price'] > res['ma20']:
+            st.success("🟢 趨勢偏多：符合『底倉』進場條件")
+            
+            # 用大字體顯示下單指令
+            st.markdown(f"""
+            ### 🛒 國泰 App 下單指令：
+            - **整股買進**：<span style='color: #1ed760; font-size: 24px; font-weight: bold;'>{res['lots']}</span> 張
+            - **零股買進**：<span style='color: #1ed760; font-size: 24px; font-weight: bold;'>{res['odds']}</span> 股
+            """, unsafe_allow_html=True)
+            
+            # 止損提醒
+            st.error(f"⚠️ 智慧單止損建議設在：**{res['stop_loss']:.2f}** 元")
+        else:
+            st.warning("🔴 趨勢偏弱：股價低於月線，目前不建議進場。")
+            
+        st.divider()
+    else:
+        st.error("查無此代號，請確認輸入是否正確。")
+
+st.info("💡 提示：本工具計算已自動避開台股單筆零股 999 股上限。")
