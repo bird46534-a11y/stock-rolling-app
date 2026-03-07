@@ -16,35 +16,30 @@ def adjust_tick(price):
     else: return round(price / 5) * 5
 
 # --- 回測引擎 ---
-def backtest_strategy(df):
+def backtest_strategy(df, capital):
     df = df.copy()
     close_prices = df['Close'].squeeze()
     ma20_series = close_prices.rolling(window=20).mean()
-    
-    in_position = False
-    buy_price = 0
-    trades = []
+    in_position, buy_price, trades = False, 0, []
     
     for i in range(20, len(df)):
         curr_p = float(close_prices.iloc[i])
         ma20 = float(ma20_series.iloc[i])
         if pd.isna(ma20): continue
-
         if not in_position:
             if curr_p > ma20:
-                in_position = True
-                buy_price = curr_p
+                in_position, buy_price = True, curr_p
         else:
             if curr_p < ma20 or curr_p < buy_price * 0.93:
-                profit = (curr_p - buy_price) / buy_price
-                trades.append(profit)
+                trades.append((curr_p - buy_price) / buy_price)
                 in_position = False
     
-    if not trades: return 0, 0, 0
+    if not trades: return 0, 0, 0, 0
     win_rate = len([t for t in trades if t > 0]) / len(trades)
     total_ret = (np.prod([1 + t for t in trades]) - 1)
-    max_loss = min(trades) if trades else 0
-    return win_rate, total_ret, max_loss
+    profit_amount = capital * total_ret
+    max_loss = min(trades)
+    return win_rate, total_ret, profit_amount, max_loss
 
 def analyze_stock(stock_no, total_capital):
     stock_id = f"{stock_no}.TW"
@@ -55,102 +50,109 @@ def analyze_stock(stock_no, total_capital):
     
     if df.empty: return None
 
-    curr_p = float(df['Close'].iloc[-1])
-    ma20_all = df['Close'].rolling(window=20).mean()
-    ma20 = float(ma20_all.iloc[-1])
+    latest_data = df.iloc[-1]
+    data_date = df.index[-1].strftime('%Y-%m-%d')
+    curr_p = float(latest_data['Close'])
+    ma_series = df['Close'].rolling(window=20).mean()
+    ma20 = float(ma_series.iloc[-1])
+    ma20_prev = float(ma_series.iloc[-6])
     
-    # 成交量分析
-    curr_vol = float(df['Volume'].iloc[-1])
+    # --- 多空判斷 ---
+    is_ma_up = ma20 > ma20_prev
+    if curr_p >= ma20 and is_ma_up:
+        trend_status, trend_color, trend_advice = "🌕 強勢多頭", "green", "趨勢向上且站穩月線，適合執行金字塔建倉。"
+    elif curr_p < ma20 and is_ma_up:
+        trend_status, trend_color, trend_advice = "⛅ 多頭回檔", "orange", "中期趨勢仍向上但短線跌破，建議觀望縮腳訊號。"
+    elif curr_p >= ma20 and not is_ma_up:
+        trend_status, trend_color, trend_advice = "☁️ 弱勢反彈", "blue", "股價雖過線但月線仍下彎，小心假突破。"
+    else:
+        trend_status, trend_color, trend_advice = "🌑 弱勢空頭", "red", "趨勢向下且股價低於月線，絕對禁止買入。"
+
+    curr_vol = float(latest_data['Volume'])
     avg_vol_5 = float(df['Volume'].iloc[-6:-1].mean())
     vol_ratio = curr_vol / avg_vol_5 if avg_vol_5 > 0 else 1
     
-    # 強調：這裏是擷取近一年 (252個交易日) 做回測
-    win_rate, total_ret, max_loss = backtest_strategy(df.iloc[-252:])
-    
+    win_rate, total_ret, profit_amt, max_loss = backtest_strategy(df.iloc[-252:], total_capital)
     shares = int((total_capital * 0.4) // curr_p)
     
-    reasons = []
-    if curr_p >= ma20:
-        reasons.append("✅ **趨勢翻多**：股價目前站穩 20 日月線之上。")
-        if vol_ratio > 1.2:
-            reasons.append(f"✅ **帶量突破**：今日成交量為均量的 {vol_ratio:.1f} 倍，攻擊力強。")
-        elif vol_ratio < 0.8:
-            reasons.append(f"⚠️ **量縮過線**：動能稍弱（僅均量 {vol_ratio:.1f} 倍），須防假突破。")
-    else:
-        reasons.append("❌ **趨勢偏弱**：股價低於月線，不宜建倉。")
-    
     return {
-        "id": stock_no, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
-        "vol": curr_vol, "vol_ratio": vol_ratio,
+        "id": stock_no, "date": data_date, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
+        "trend_status": trend_status, "trend_color": trend_color, "trend_advice": trend_advice,
+        "vol": curr_vol, "avg_vol_5": avg_vol_5, "vol_ratio": vol_ratio,
         "lots": shares // 1000, "odds": shares % 1000,
         "stop_loss": adjust_tick(curr_p * 0.93),
         "add_1": adjust_tick(curr_p * 1.07), "tp_1": adjust_tick(curr_p * 1.15),
-        "win_rate": win_rate, "total_ret": total_ret, "max_loss": max_loss,
-        "reasons": reasons, "capital": total_capital
+        "win_rate": win_rate, "total_ret": total_ret, "profit_amt": profit_amt, "max_loss": max_loss,
+        "capital": total_capital
     }
 
 # --- 介面呈現 ---
 st.title("📈 台股滾動交易決策看板")
 
 st.sidebar.header("⚙️ 參數設定")
-user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, max_value=10000000, value=100000, step=10000)
+user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, value=100000, step=10000)
 
-target = st.text_input("📍 請輸入股票代號 (例如: 3481)", "")
+target = st.text_input("📍 請輸入股票代號 (例如: 2330)", "")
 
 if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        st.subheader(f"📊 {res['id']} 策略分析報告 (近一年回測)")
+        st.subheader(f"🔍 {res['id']} 多空趨勢與一年回測")
+        st.markdown(f"### 狀態：:{res['trend_color']}[{res['trend_status']}]")
+        st.info(f"💡 **建議**：{res['trend_advice']}")
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("當前股價", f"{res['price']:.2f}")
-        m2.metric("今日成交量", f"{int(res['vol']):,}")
-        m3.metric("量能倍數", f"{res['vol_ratio']:.2f}x")
+        v1, v2, v3 = st.columns(3)
+        v1.metric("當前股價", f"{res['price']:.2f}")
+        v2.metric("最新成交量", f"{int(res['vol']):,}")
+        v3.metric("量能倍數", f"{res['vol_ratio']:.2f}x")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("一年歷史勝率", f"{res['win_rate']*100:.1f}%")
-        c2.metric("一年累積報酬", f"{res['total_ret']*100:.1f}%")
-        c3.metric("單筆最大損", f"{res['max_loss']*100:.1f}%")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("歷史勝率", f"{res['win_rate']*100:.1f}%")
+        c2.metric("累積報酬", f"{res['total_ret']*100:.1f}%")
+        c3.metric("獲利金額", f"{int(res['profit_amt']):,}")
+        c4.metric("最大單賠", f"{res['max_loss']*100:.1f}%")
         
         st.divider()
-        st.subheader("💡 盤勢診斷原因")
-        for r in res['reasons']:
-            st.write(r)
 
-        if res['price'] >= res['ma20']:
-            st.success(f"✅ 符合建倉條件 (本金：{res['capital']:,.0f})")
-            report = f"""
-【{res['id']} 滾動計畫建議】
-1. 初始建倉價格：{res['price']:.2f} 元。
-2. 下單指令：買進【 {res['lots']} 張 + {res['odds']} 股 】。
-3. 防守位：跌破 {res['stop_loss']:.2f} 元 (-7%) 全數清倉。
-4. 加倉點：漲至 {res['add_1']:.2f} 元 (+7%) 時再投入 30% 本金。
-5. 停利點：目標價 {res['tp_1']:.2f} 元 (+15%)。
-            """
-            st.code(report, language="text")
+        if "多頭" in res['trend_status'] or "反彈" in res['trend_status']:
+            st.success(f"✅ 符合建倉條件 (本金規模：{res['capital']:,.0f})")
+            st.code(f"【{res['id']} 作戰計畫】\n建議買進：{res['lots']}張 + {res['odds']}股\n防守止損：{res['stop_loss']:.2f}", language="text")
             
             plan_df = pd.DataFrame({
                 "動作": ["🛑 止損", "📍 建倉", "➕ 加倉", "💰 停利"],
                 "價格": [f"{res['stop_loss']:.2f}", f"{res['price']:.2f}", f"{res['add_1']:.2f}", f"{res['tp_1']:.2f}"]
             })
             st.table(plan_df)
+        else:
+            st.warning(f"❌ 趨勢偏弱，暫不執行計畫。")
 
-        # --- 補回：策略準則與提示 ---
+        # --- 底部：滾動策略準則 (補強內容) ---
         st.divider()
-        st.subheader("📖 滾動策略準則")
-        st.markdown(f"""
-        - **金字塔建倉**：總本金 {res['capital']:,.0f} 元，分 4:3:3 比例投入。底倉佔 **{res['capital']*0.4:,.0f}** 元。
-        - **止損紀律**：買入後跌破 -7% 絕對執行清倉，絕不補倉。
-        - **趨勢出場**：當股價收盤跌破月線 ({res['ma20']:.2f}) 時，代表趨勢轉弱，應全數獲利了結或止損。
-        """)
+        st.subheader("📖 金字塔滾動策略準則")
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            st.markdown("### 1️⃣ 資金分配 (4:3:3)")
+            st.write(f" - **第一筆 (底倉 40%)**: 站穩月線進場。")
+            st.write(f" - **第二筆 (加碼 30%)**: 獲利達 +7% 時加碼。")
+            st.write(f" - **第三筆 (加碼 30%)**: 獲利續推或突破新高。")
+        with col_s2:
+            st.markdown("### 2️⃣ 出場紀律")
+            st.write(f" - **硬性止損**: 買入價 -7% 絕對出場。")
+            st.write(f" - **趨勢轉向**: 股價跌破月線 ({res['ma20']:.2f})。")
+            st.write(f" - **分批停利**: 獲利達 +15% 以上逐步減碼。")
+        
+        st.markdown("---")
+        st.markdown("### 3️⃣ 價量配合心法")
+        st.markdown("- **帶量突破**: 股價過線且量能大於均量 1.2 倍為最佳買點。")
+        st.markdown("- **量縮整理**: 股價回測月線不破且縮量，為多頭續強訊號。")
 
         st.info(f"""
         **💡 溫馨提示：**
-        1. **回測資料說明**：上方顯示之勝率與報酬率是基於**過去一年 (約 252 個交易日)** 的歷史數據模擬而成，回測結果僅供參考。
-        2. **跳動單位修正**：所有產出價格（如：{res['price']:.2f}）已自動修正至台股跳動單位，可直接於國泰 App 下單。
-        3. **行情延遲**：數據約延遲 15 分鐘，實際成交請以證券商即時報價為準。
-        4. **紀律第一**：金字塔策略核心為「砍斷虧損，讓利潤奔跑」。
+        1. **一年回測說明**：歷史數據計算區間為過去 252 個交易日（統計至 {res['date']}）。
+        2. **跳動單位**：所有價格（如止損價 {res['stop_loss']:.2f}）已修正至台股級距。
+        3. **執行力**：策略核心在於「砍斷虧損，讓利潤奔跑」，計畫產出後請嚴格執行智慧單。
         """)
     else:
         st.error("查無資料。")
