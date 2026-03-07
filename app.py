@@ -15,10 +15,9 @@ def adjust_tick(price):
     elif price < 1000: return round(price)
     else: return round(price / 5) * 5
 
-# --- 回測引擎 (已修正相容性問題) ---
+# --- 回測引擎 ---
 def backtest_strategy(df):
     df = df.copy()
-    # 確保資料是 Series 格式
     close_prices = df['Close'].squeeze()
     ma20_series = close_prices.rolling(window=20).mean()
     
@@ -26,11 +25,9 @@ def backtest_strategy(df):
     buy_price = 0
     trades = []
     
-    # 從有 MA20 的地方開始跑
     for i in range(20, len(df)):
         curr_p = float(close_prices.iloc[i])
         ma20 = float(ma20_series.iloc[i])
-        
         if pd.isna(ma20): continue
 
         if not in_position:
@@ -58,16 +55,16 @@ def analyze_stock(stock_no, total_capital):
     
     if df.empty: return None
 
-    # 修正資料選取邏輯
-    curr_p = float(df['Close'].iloc[-1].item()) if hasattr(df['Close'].iloc[-1], 'item') else float(df['Close'].iloc[-1])
+    curr_p = float(df['Close'].iloc[-1])
     ma20_all = df['Close'].rolling(window=20).mean()
-    ma20 = float(ma20_all.iloc[-1].item()) if hasattr(ma20_all.iloc[-1], 'item') else float(ma20_all.iloc[-1])
+    ma20 = float(ma20_all.iloc[-1])
     
     # 成交量分析
-    curr_vol = float(df['Volume'].iloc[-1].item()) if hasattr(df['Volume'].iloc[-1], 'item') else float(df['Volume'].iloc[-1])
+    curr_vol = float(df['Volume'].iloc[-1])
     avg_vol_5 = float(df['Volume'].iloc[-6:-1].mean())
     vol_ratio = curr_vol / avg_vol_5 if avg_vol_5 > 0 else 1
     
+    # 強調：這裏是擷取近一年 (252個交易日) 做回測
     win_rate, total_ret, max_loss = backtest_strategy(df.iloc[-252:])
     
     shares = int((total_capital * 0.4) // curr_p)
@@ -98,13 +95,13 @@ st.title("📈 台股滾動交易決策看板")
 st.sidebar.header("⚙️ 參數設定")
 user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, max_value=10000000, value=100000, step=10000)
 
-target = st.text_input("📍 請輸入股票代號 (例如: 2330)", "")
+target = st.text_input("📍 請輸入股票代號 (例如: 3481)", "")
 
 if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        st.subheader(f"📊 {res['id']} 策略分析與回測")
+        st.subheader(f"📊 {res['id']} 策略分析報告 (近一年回測)")
         
         m1, m2, m3 = st.columns(3)
         m1.metric("當前股價", f"{res['price']:.2f}")
@@ -112,8 +109,8 @@ if target:
         m3.metric("量能倍數", f"{res['vol_ratio']:.2f}x")
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("歷史勝率", f"{res['win_rate']*100:.1f}%")
-        c2.metric("累積報酬率", f"{res['total_ret']*100:.1f}%")
+        c1.metric("一年歷史勝率", f"{res['win_rate']*100:.1f}%")
+        c2.metric("一年累積報酬", f"{res['total_ret']*100:.1f}%")
         c3.metric("單筆最大損", f"{res['max_loss']*100:.1f}%")
         
         st.divider()
@@ -139,9 +136,21 @@ if target:
             })
             st.table(plan_df)
 
+        # --- 補回：策略準則與提示 ---
         st.divider()
-        st.subheader("📖 策略準則與提示")
-        st.markdown(f"- **底倉 (40%)**：預計投入 **{res['capital']*0.4:,.0f}** 元。")
-        st.info(f"💡 溫馨提示：價格已依跳動單位修正。數據約延遲 15 分鐘。")
+        st.subheader("📖 滾動策略準則")
+        st.markdown(f"""
+        - **金字塔建倉**：總本金 {res['capital']:,.0f} 元，分 4:3:3 比例投入。底倉佔 **{res['capital']*0.4:,.0f}** 元。
+        - **止損紀律**：買入後跌破 -7% 絕對執行清倉，絕不補倉。
+        - **趨勢出場**：當股價收盤跌破月線 ({res['ma20']:.2f}) 時，代表趨勢轉弱，應全數獲利了結或止損。
+        """)
+
+        st.info(f"""
+        **💡 溫馨提示：**
+        1. **回測資料說明**：上方顯示之勝率與報酬率是基於**過去一年 (約 252 個交易日)** 的歷史數據模擬而成，回測結果僅供參考。
+        2. **跳動單位修正**：所有產出價格（如：{res['price']:.2f}）已自動修正至台股跳動單位，可直接於國泰 App 下單。
+        3. **行情延遲**：數據約延遲 15 分鐘，實際成交請以證券商即時報價為準。
+        4. **紀律第一**：金字塔策略核心為「砍斷虧損，讓利潤奔跑」。
+        """)
     else:
         st.error("查無資料。")
