@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="國泰滾動決策中心", layout="centered")
+st.set_page_config(page_title="金字塔滾動決策中心", layout="centered")
 
 # --- 核心邏輯：跳動單位修正 ---
 def adjust_tick(price):
