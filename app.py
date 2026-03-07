@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="金字塔滾動決策中心", layout="centered")
+st.set_page_config(page_title="金字塔滾動策略系統", layout="centered")
 
 # --- 核心邏輯：跳動單位修正 ---
 def adjust_tick(price):
@@ -41,6 +41,14 @@ def backtest_strategy(df, capital):
     max_loss = min(trades)
     return win_rate, total_ret, profit_amount, max_loss
 
+@st.cache_data(ttl=3600)
+def get_stock_name(stock_id):
+    try:
+        ticker = yf.Ticker(stock_id)
+        return ticker.info.get('shortName', stock_id)
+    except:
+        return stock_id
+
 def analyze_stock(stock_no, total_capital):
     stock_id = f"{stock_no}.TW"
     df = yf.download(stock_id, period="2y", interval="1d", progress=False)
@@ -50,6 +58,7 @@ def analyze_stock(stock_no, total_capital):
     
     if df.empty: return None
 
+    stock_name = get_stock_name(stock_id)
     df = df[df['Volume'] > 0].copy()
     latest_data = df.iloc[-1]
     data_date = df.index[-1].strftime('%Y-%m-%d')
@@ -67,16 +76,14 @@ def analyze_stock(stock_no, total_capital):
     ma20_prev = float(ma_series.iloc[-6])
     is_ma_up = ma20 > ma20_prev
     
-    # 診斷理由與多空邏輯
+    # 診斷理由
     reasons = []
     if curr_p >= ma20:
         if is_ma_up:
             trend_status, trend_color = "🌕 強勢多頭", "green"
             reasons.append("✅ **趨勢翻多**：股價站在上彎的月線之上。")
             if vol_ratio >= 1.2:
-                reasons.append(f"🔥 **帶量突破**：成交張數 ({main_volume_lots}) 具備攻擊動能。")
-            elif vol_ratio < 0.8:
-                reasons.append(f"⚠️ **量縮過線**：雖然過線但動能不足，慎防震盪。")
+                reasons.append(f"🔥 **帶量突破**：一般成交張數 ({main_volume_lots}) 具備強大攻擊力。")
         else:
             trend_status, trend_color = "☁️ 弱勢反彈 (防假突破)", "blue"
             reasons.append("⚠️ **假突破警戒**：股價雖過線，但月線仍下彎，不建議進場。")
@@ -88,7 +95,7 @@ def analyze_stock(stock_no, total_capital):
     shares = int((total_capital * 0.4) // curr_p)
     
     return {
-        "id": stock_no, "date": data_date, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
+        "id": stock_no, "name": stock_name, "date": data_date, "price": adjust_tick(curr_p), "ma20": adjust_tick(ma20),
         "trend_status": trend_status, "trend_color": trend_color, "reasons": reasons,
         "main_vol": main_volume_lots, "odd_vol": odd_volume_shares, "avg_vol_5": avg_vol_5_lots,
         "lots": shares // 1000, "odds": shares % 1000,
@@ -99,18 +106,20 @@ def analyze_stock(stock_no, total_capital):
     }
 
 # --- 介面呈現 ---
-st.title("📈 國泰滾動決策中心")
+st.title("🏆 金字塔滾動策略系統")
 
 st.sidebar.header("⚙️ 參數設定")
 user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, value=100000, step=10000)
 
-target = st.text_input("📍 請輸入股票代號 (如: 3481)", "")
+target = st.text_input("📍 請輸入股票代號 (如: 2330)", "")
 
 if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        st.subheader(f"🔍 {res['id']} 診斷報告 (日期: {res['date']})")
+        # 顯示名稱與代號
+        st.header(f"{res['name']} ({res['id']})")
+        st.subheader(f"🔍 診斷報告 (日期: {res['date']})")
         st.markdown(f"### 狀態：:{res['trend_color']}[{res['trend_status']}]")
         
         v1, v2, v3 = st.columns(3)
@@ -135,26 +144,26 @@ if target:
         
         if res['trend_status'] == "🌕 強勢多頭":
             st.success("✅ 符合建倉條件")
-            st.code(f"買進建議：{res['lots']}張 + {res['odds']}股\n止損參考：{res['stop_loss']:.2f}", language="text")
+            st.code(f"【作戰計畫】\n建議買進：{res['lots']}張 + {res['odds']}股\n止損參考：{res['stop_loss']:.2f}", language="text")
             plan_df = pd.DataFrame({
                 "動作": ["🛑 止損", "📍 建倉", "➕ 加倉", "💰 停利"],
                 "價格": [f"{res['stop_loss']:.2f}", f"{res['price']:.2f}", f"{res['add_1']:.2f}", f"{res['tp_1']:.2f}"]
             })
             st.table(plan_df)
         else:
-            st.warning(f"❌ 當前非強勢多頭，暫不執行計畫。")
+            st.warning(f"❌ 當前非強勢多頭，不建議執行金字塔建倉。")
 
-        # --- 底部：補回金字塔策略準則 ---
+        # --- 底部：金字塔策略準則 ---
         st.subheader("📖 金字塔滾動策略準則")
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown("#### 1️⃣ 資金分配 (4:3:3)")
-            st.write(f"- **第一筆 (40%)底倉**：股價站穩月線進場。")
-            st.write(f"- **第二筆 (30%)加碼**：獲利達 **+7%** 時執行。")
-            st.write(f"- **第三筆 (30%)剩餘**：獲利持續擴大或帶量突破新高。")
+            st.write(f"- **底倉 (40%)**：股價站穩月線進場。")
+            st.write(f"- **加碼 (30%)**：獲利達 **+7%** 時執行。")
+            st.write(f"- **剩餘 (30%)**：獲利擴大或帶量突破新高。")
         with col_b:
             st.markdown("#### 2️⃣ 出場紀律")
-            st.write(f"- **硬性止損**：買入成本 **-7%** 絕對出場。")
+            st.write(f"- **硬性止損**：成本 **-7%** 出場。")
             st.write(f"- **趨勢出場**：收盤跌破月線 (**{res['ma20']:.2f}**)。")
             st.write(f"- **移動停利**：獲利達 **+15%** 以上分批落袋。")
 
