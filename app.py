@@ -41,20 +41,25 @@ def backtest_strategy(df, capital):
     max_loss = min(trades)
     return win_rate, total_ret, profit_amount, max_loss
 
-# --- 優化後的個股名稱抓取 ---
-@st.cache_data(ttl=86400) # 快取一天，避免重複請求
+# --- 強度更高的中文名稱抓取 ---
+@st.cache_data(ttl=86400)
 def get_stock_name(stock_id):
     try:
         ticker = yf.Ticker(stock_id)
-        # 優先嘗試不同的名稱欄位
+        # 嘗試從 info 中提取，Yahoo 對台股通常在 longName 或 shortName 提供中文
         info = ticker.info
         name = info.get('longName') or info.get('shortName') or info.get('symbol')
+        
+        # 過濾：如果抓到的是純英文且包含 ".TW"，則只顯示代號
+        if not name or name == stock_id:
+            return stock_id.split('.')[0]
         return name
     except:
-        return stock_id.split('.')[0] # 失敗時至少回傳數字代號
+        return stock_id.split('.')[0]
 
 def analyze_stock(stock_no, total_capital):
     stock_id = f"{stock_no}.TW"
+    # 下載數據，強制不使用 progress bar 減少干擾
     df = yf.download(stock_id, period="2y", interval="1d", progress=False)
     if df.empty or len(df) < 20:
         stock_id = f"{stock_no}.TWO"
@@ -62,7 +67,9 @@ def analyze_stock(stock_no, total_capital):
     
     if df.empty: return None
 
+    # 執行名稱抓取
     stock_name = get_stock_name(stock_id)
+    
     df = df[df['Volume'] > 0].copy()
     latest_data = df.iloc[-1]
     data_date = df.index[-1].strftime('%Y-%m-%d')
@@ -73,13 +80,13 @@ def analyze_stock(stock_no, total_capital):
     main_volume_lots = total_volume_shares // 1000
     odd_volume_shares = total_volume_shares % 1000
     avg_vol_5_lots = round(float(df['Volume'].iloc[-6:-1].mean()) / 1000)
-    vol_ratio = main_volume_lots / avg_vol_5_lots if avg_vol_5_lots > 0 else 1
     
     ma_series = df['Close'].rolling(window=20).mean()
     ma20 = float(ma_series.iloc[-1])
     ma20_prev = float(ma_series.iloc[-6])
     is_ma_up = ma20 > ma20_prev
     
+    # 診斷與假突破邏輯
     reasons = []
     if curr_p >= ma20:
         if is_ma_up:
@@ -87,10 +94,10 @@ def analyze_stock(stock_no, total_capital):
             reasons.append("✅ **趨勢翻多**：股價站在上彎的月線之上。")
         else:
             trend_status, trend_color = "☁️ 弱勢反彈 (防假突破)", "blue"
-            reasons.append("⚠️ **假突破警戒**：月線仍下彎，不建議進場。")
+            reasons.append("⚠️ **假突破警戒**：月線仍下彎，目前過線極可能是假突破。")
     else:
         trend_status, trend_color = ("⛅ 多頭回檔", "orange") if is_ma_up else ("🌑 趨勢偏弱", "red")
-        reasons.append("❌ **目前不符合建倉條件。**")
+        reasons.append("❌ **目前不符合建倉條件**。")
 
     win_rate, total_ret, profit_amt, max_loss = backtest_strategy(df.iloc[-252:], total_capital)
     shares = int((total_capital * 0.4) // curr_p)
@@ -112,13 +119,13 @@ st.title("🏆 金字塔滾動策略系統")
 st.sidebar.header("⚙️ 參數設定")
 user_capital = st.sidebar.number_input("總投入本金 (台幣)", min_value=10000, value=100000, step=10000)
 
-target = st.text_input("📍 請輸入股票代號 (如: 2330)", "")
+target = st.text_input("📍 請輸入股票代號 (如: 2330, 3481)", "")
 
 if target:
     res = analyze_stock(target, user_capital)
     if res:
         st.divider()
-        # 標題加強呈現
+        # 標題優化：顯眼的中文字樣
         st.header(f"📌 {res['name']} ({res['id']})")
         st.markdown(f"### 當前狀態：:{res['trend_color']}[{res['trend_status']}]")
         
@@ -129,7 +136,7 @@ if target:
         st.caption(f"ℹ️ 包含額外零股/盤後量：{res['odd_vol']:,} 股 | 數據日期: {res['date']}")
 
         st.write("---")
-        st.subheader("💡 診斷細節")
+        st.subheader("💡 盤勢診斷細節")
         for r in res['reasons']: st.write(r)
 
         st.write("---")
@@ -151,7 +158,7 @@ if target:
             })
             st.table(plan_df)
         else:
-            st.warning(f"❌ 目前不建議執行計畫。")
+            st.warning(f"❌ 目前非強勢多頭，不建議執行金字塔建倉。")
 
         # --- 底部：金字塔策略準則 ---
         st.subheader("📖 金字塔滾動策略準則")
@@ -170,7 +177,7 @@ if target:
         st.info(f"""
         **⚠️ 投資風險溫馨提醒：**
         1. **回測數據說明**：歷史績效係根據過去一年數據模擬，不代表未來表現。
-        2. **假突破風險**：即便指標翻多，仍須嚴格設定止損。
+        2. **假突破風險**：即便指標翻多，仍須嚴格設定止損以應對假突破陷阱。
         3. **執行力**：策略核心在於「砍斷虧損，讓利潤奔跑」。
         """)
     else:
