@@ -4,8 +4,17 @@ import pandas as pd
 
 # --- 網頁配置 ---
 st.set_page_config(page_title="國泰滾動決策中心", layout="centered")
+
+# 自定義 CSS 讓介面更美觀
+st.markdown("""
+    <style>
+    .stProgress > div > div > div > div { background-color: #1ed760; }
+    .price-box { padding: 20px; border-radius: 10px; border: 1px solid #444; margin: 10px 0; }
+    </style>
+    """, unsafe_allow_html=True)
+
 st.title("📈 台股滾動交易決策看板")
-st.caption("策略：10萬金字塔滾動法 | 包含自動化盤勢解析與出場計畫")
+st.caption("策略：10萬金字塔滾動法 | 視覺化戰術地圖")
 
 # --- 核心邏輯 ---
 def analyze_stock(stock_no):
@@ -17,59 +26,66 @@ def analyze_stock(stock_no):
     
     if df.empty: return None
 
-    # 技術指標
     curr_p = float(df['Close'].iloc[-1])
     ma20 = float(df['Close'].rolling(window=20).mean().iloc[-1])
     
-    # 1. 買入計畫 (金字塔加倉)
-    plan_buy = [
-        {"階段": "底倉 (40%)", "觸發條件": "站上月線", "建議價格": f"{curr_p:.2f}"},
-        {"階段": "第一次加倉", "觸發條件": "漲 7%", "建議價格": f"{curr_p * 1.07:.2f}"},
-        {"階段": "第二次加倉", "觸發條件": "再漲 7%", "建議價格": f"{curr_p * 1.14:.2f}"},
-    ]
-
-    # 2. 出場計畫 (分批停利)
-    plan_sell = [
-        {"目標": "初始止損", "條件": "跌破成本 7%", "價格": f"{curr_p * 0.93:.2f}", "動作": "全數清倉"},
-        {"目標": "第一波停利", "條件": "獲利回檔 5%", "價格": f"{curr_p * 1.10:.2f}", "動作": "減倉一半"},
-        {"目標": "最終保命", "條件": "跌破月線", "價格": f"{ma20:.2f}", "動作": "全數清倉"},
-    ]
-    
-    # 國泰下單股數
-    target_amount = 40000 
-    shares = int(target_amount // curr_p)
+    # 國泰下單股數 (本金 40,000 為底倉)
+    shares = int(40000 // curr_p)
     
     return {
         "price": curr_p,
         "ma20": ma20,
         "lots": shares // 1000,
-        "odds": shares % 1000,
-        "buy_table": pd.DataFrame(plan_buy),
-        "sell_table": pd.DataFrame(plan_sell)
+        "odds": shares % 1000
     }
 
 # --- 介面呈現 ---
-target = st.text_input("📍 請輸入股票代號", "")
+target = st.text_input("📍 請輸入股票代號", placeholder="例如: 3481")
 
 if target:
     res = analyze_stock(target)
     if res:
         st.divider()
-        st.metric("當前股價", f"{res['price']:.2f}", delta=f"{res['price']-res['ma20']:.2f} (距月線)")
+        
+        # 頂部核心數據
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("當前股價", f"{res['price']:.2f}")
+        with col2:
+            diff = res['price'] - res['ma20']
+            st.metric("月線 (MA20)", f"{res['ma20']:.2f}", delta=f"{diff:.2f}")
 
         if res['price'] > res['ma20']:
-            st.success(f"🛒 **今日建議買入**：{res['lots']} 張 + {res['odds']} 股")
+            st.success(f"✅ 趨勢偏多：建議買入 {res['lots']} 張 + {res['odds']} 股")
             
-            # 顯示加倉計畫圖表
+            # --- 視覺化加倉地圖 ---
             st.subheader("🚀 進場與加倉地圖")
-            st.table(res['buy_table'])
-
-            # 顯示停利/停損計畫圖表
-            st.subheader("🛡️ 出場與停利計畫")
-            st.table(res['sell_table'])
+            p = res['price']
             
-            st.info("💡 建議：將上述價格設定在國泰 App 的『智慧單』，達到價格自動提醒。")
+            st.write(f"1. **底倉已就位** ({p:.2f})")
+            st.progress(0.33)
+            
+            st.write(f"2. **預計加倉點 (+7%)**：🎯 **{p * 1.07:.2f}**")
+            st.progress(0.0)
+            
+            st.write(f"3. **目標停利點 (+15%)**：💰 **{p * 1.15:.2f}**")
+            
+            # --- 分批出場計畫表 ---
+            st.subheader("🛡️ 國泰智慧單設定參考")
+            
+            # 建立帶有顏色標記的表格數據
+            plan_data = {
+                "目標": ["⚠️ 初始止損", "⚖️ 成本保衛", "💎 分批停利", "🚪 終極清倉"],
+                "觸發價格": [f"{p*0.93:.2f}", f"{p:.2f}", f"{p*1.10:.2f}", f"{res['ma20']:.2f}"],
+                "動作": ["全數清倉", "減倉一半", "獲利入袋", "全數清倉"]
+            }
+            st.table(pd.DataFrame(plan_data))
+            
+            st.info("💡 提示：進度條代表目前的獲利進程，當股價上漲時，上方進度會自動填滿。")
         else:
-            st.warning("目前股價在月線下，暫不建議執行金字塔加倉策略。")
+            st.warning("目前股價低於月線，暫不建議進場。")
+            st.write(f"💡 需等股價回升至 **{res['ma20']:.2f}** 以上再考慮。")
+            
+        st.divider()
     else:
-        st.error("查無資料。")
+        st.error("查無資料，請確認代號是否正確。")
